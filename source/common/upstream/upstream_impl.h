@@ -173,11 +173,16 @@ public:
     absl::ReaderMutexLock lock(&metadata_mutex_);
     return endpoint_metadata_;
   }
+  std::size_t metadataHash() const override {
+    absl::ReaderMutexLock lock(&metadata_mutex_);
+    return endpoint_metadata_hash_;
+  }
   void metadata(MetadataConstSharedPtr new_metadata) override {
     auto& new_socket_factory = resolveTransportSocketFactory(address(), new_metadata.get());
     {
       absl::WriterMutexLock lock(&metadata_mutex_);
       endpoint_metadata_ = new_metadata;
+      endpoint_metadata_hash_ = new_metadata ? MessageUtil::hash(*new_metadata) : 0;
       // Update data members dependent on metadata.
       socket_factory_ = new_socket_factory;
     }
@@ -220,9 +225,11 @@ public:
   }
   uint32_t priority() const override { return priority_; }
   void priority(uint32_t priority) override { priority_ = priority; }
-  Network::UpstreamTransportSocketFactory&
-  resolveTransportSocketFactory(const Network::Address::InstanceConstSharedPtr& dest_address,
-                                const envoy::config::core::v3::Metadata* metadata) const override;
+  Network::UpstreamTransportSocketFactory& resolveTransportSocketFactory(
+      const Network::Address::InstanceConstSharedPtr& dest_address,
+      const envoy::config::core::v3::Metadata* metadata,
+      Network::TransportSocketOptionsConstSharedPtr transport_socket_options =
+          nullptr) const override;
   absl::optional<MonotonicTime> lastHcPassTime() const override { return last_hc_pass_time_; }
 
   void setHealthChecker(HealthCheckHostMonitorPtr&& health_checker) override {
@@ -267,6 +274,7 @@ private:
   std::atomic<bool> canary_;
   mutable absl::Mutex metadata_mutex_;
   MetadataConstSharedPtr endpoint_metadata_ ABSL_GUARDED_BY(metadata_mutex_);
+  std::size_t endpoint_metadata_hash_ ABSL_GUARDED_BY(metadata_mutex_){0};
   const MetadataConstSharedPtr locality_metadata_;
   const std::shared_ptr<const envoy::config::core::v3::Locality> locality_;
   Stats::StatNameDynamicStorage locality_zone_stat_name_;
@@ -406,6 +414,7 @@ public:
 
     // If any of the degraded flags are set, host is degraded.
     if (healthFlagsGet(enumToInt(HealthFlag::DEGRADED_ACTIVE_HC) |
+                       enumToInt(HealthFlag::DEGRADED_OUTLIER_DETECTION) |
                        enumToInt(HealthFlag::DEGRADED_EDS_HEALTH))) {
       return Host::Health::Degraded;
     }
@@ -949,18 +958,16 @@ public:
   upstreamHttpProtocol(absl::optional<Http::Protocol> downstream_protocol) const override;
 
   // Http::FilterChainFactory
-  bool createFilterChain(Http::FilterChainManager& manager,
-                         const Http::FilterChainOptions& options) const override {
+  bool createFilterChain(Http::FilterChainFactoryCallbacks& callbacks) const override {
     if (http_filter_factories_.empty()) {
       return false;
     }
 
-    Http::FilterChainUtility::createFilterChainForFactories(manager, options,
-                                                            http_filter_factories_);
+    Http::FilterChainUtility::createFilterChainForFactories(callbacks, http_filter_factories_);
     return true;
   }
-  bool createUpgradeFilterChain(absl::string_view, const UpgradeMap*, Http::FilterChainManager&,
-                                const Http::FilterChainOptions&) const override {
+  bool createUpgradeFilterChain(absl::string_view, const UpgradeMap*,
+                                Http::FilterChainFactoryCallbacks&) const override {
     // Upgrade filter chains not yet supported for upstream HTTP filters.
     return false;
   }
